@@ -378,6 +378,7 @@ plot_cases_temp <- function(y = "cases", ctry) {
 ```
 
 ```{r}
+# First NPI by country
 df_pp %>%
   dplyr::select(country, date, cases, schools, events, gatherings, venues, borders, lockdown, homeoffice) %>%
   reshape2::melt(c("country", "date", "cases")) %>%
