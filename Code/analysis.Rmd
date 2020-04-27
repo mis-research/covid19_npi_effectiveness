@@ -1,0 +1,992 @@
+---
+  title: "Analysis"
+author: "MIS COVID Task Force"
+date: "4/3/2020"
+output: html_document
+---
+  
+  ```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Libraries
+
+```{r, include=FALSE, echo=FALSE}
+library(tidyverse)
+library(ggrepel)
+library(gghighlight)
+library(tikzDevice)
+library(lubridate)
+library(GGally)
+
+library(rstan)
+library(brms)
+library(rethinking)
+library(tidybayes)
+library(bayesplot)
+library(LaplacesDemon)
+
+text_size = 8
+update_geom_defaults("text", list(size = text_size))
+theme_nature <- function () { 
+  theme_classic(base_size = text_size, base_family = 'sans') %+replace% 
+    theme(
+      axis.text = element_text(size = text_size),
+      axis.title = element_text(size = text_size),
+      plot.title = element_text(size = text_size + 2, face = "bold", hjust = 0.5, margin = ggplot2::margin(0, 0, 5, 0))
+    )
+}
+
+# Round function
+round_k <- function(x, k = 2) {
+  trimws(format(round(x, k), nsmall = k))
+}
+
+# Check if value is double
+is.numeric.double <- function(x) {
+  if (is.numeric(x)) {
+    if (all(x %% 1 == 0)) {
+      return(F)
+    }
+    else {
+      return(T)
+    }
+  } 
+  else {
+    return(F)
+  }
+}
+
+# Remove leading zero
+rzero <- function(x) {
+  x <- as.character(x)
+  fc <- substr(x, 1, 1)
+  if (fc == "0")
+    return(substr(x, 2, nchar(x)))
+  else
+    return(paste0("$-$", substr(x, 3, nchar(x))))
+}
+
+tex_sign <- function(x) {
+  x_new <- character(length(x))
+  for (i in 1:length(x)) {
+    is_negative <- ifelse(substr(x[i], 1, 1) == "-", T, F)
+    if (is_negative) {
+      x_new[i] <- paste0("$-$", substr(x[i], 2, nchar(x[i])))
+    } else {
+      x_new[i] <- x[i]
+    }
+  }
+  return(x_new)
+}
+```
+
+## Data
+
+```{r}
+df <- read_csv("../Data/data.csv") 
+```
+
+## Descriptives
+
+### Fig 1
+
+```{r}
+heat_pl <- function(highlight_country, order_by = "Gathering ban", relative_cases = FALSE) {
+  
+  fname <- "policies_country_cases"
+  cbar_title <- "Cumulative Cases"
+  
+  if (relative_cases) {
+    fname <- paste(fname,"_rel",sep="")
+    cbar_title <- paste(cbar_title, "\n per 1M pop.")
+  }
+  
+  if (relative_cases) {
+    df$cases <- df$cases / df$pop
+  }
+  
+  df <- df %>% 
+    dplyr::filter(country %in% highlight_country)
+  
+  cases_to_npi <- df %>% 
+    dplyr::select(-cases, -`new cases`, -pop) %>%
+    reshape2::melt(c("country", "date")) %>%
+    rename(measure = variable) %>%
+    dplyr::filter(value == 1) %>%
+    group_by(country, measure) %>%
+    slice(1) %>%
+    ungroup() %>%
+    complete(country, measure) %>%
+    dplyr::select(-value)
+  cases_to_npi <- cases_to_npi %>%
+    left_join(df %>% dplyr::select(c("country", "date", "cases")), by = c("country", "date")) %>%
+    dplyr::select(-date) %>%
+    spread(measure, cases) %>%
+    reshape2::melt(id.vars = "country") %>%
+    rename(npi = variable, cases = value)
+  
+  order_dat <- cases_to_npi %>%
+    dplyr::filter(npi == order_by) %>%
+    arrange(cases) %>%
+    mutate(rank_order = n():1) %>%
+    dplyr::select(c("country", "rank_order"))
+  cases_to_npi <- left_join(cases_to_npi, order_dat, by = "country")
+  
+  # reorder y alphabetically
+  cases_to_npi$rank_order <- -match(tolower(substr(cases_to_npi$country,1,1)), letters[1:26])
+  
+  # reorder x based on table in paper
+  cases_to_npi$npi <- factor(cases_to_npi$npi,levels = c("School closure", "Border closure", "Event ban",
+                                                         "Gathering ban", "Venue closure", "Lockdown", "Work ban"))
+  
+  # determine cbar range
+  max_cases = max(cases_to_npi$cases[!is.na(cases_to_npi$cases)])
+  cbar_range = (1:max_cases*10)[(log10(1:max_cases*10)%%1) == 0]
+  
+  ht_pl <- cases_to_npi %>%
+    ggplot(aes(x = npi, y = reorder(country, rank_order), fill = cases)) +
+    geom_tile(stat = "identity", color="white") +
+    scale_fill_distiller(palette = "YlGnBu",
+                         na.value="gray92",
+                         direction = 1,
+                         trans = scales::pseudo_log_trans(),
+                         limits = c(0, max(cbar_range)), breaks = cbar_range,
+                         labels = function(x) scales::comma(x, accuracy = 1.0)) +
+    scale_x_discrete(position = "top") +
+    labs(x = "", y = "", fill = cbar_title) +
+    theme_nature() +
+    theme(legend.position = "right", legend.box = "horizontal",
+          legend.key.width = unit(.3, "cm"),
+          legend.key.height = unit(1., "cm"),
+          axis.text = element_text(size = 7),
+          axis.text.x = element_text(angle = 45, hjust = 0)) +
+    guides(fill = guide_colorbar(title.position="top"))
+
+  return(ht_pl)
+}
+
+heat_pl(highlight_country = sort(df$country), order_by = "Gathering ban", relative_cases = FALSE)
+```
+
+### Fig S1
+
+```{r}
+heat_pl(highlight_country = sort(df$country), order_by = "Gathering ban", relative_cases = TRUE)
+```
+
+### Fig S2
+
+```{r}
+time_ranks <- c(as.character(1:7), "NA")
+order_time_ranks <- 8:1
+names(order_time_ranks) <- time_ranks
+
+dates_rank <- df %>%
+  dplyr::select(-cases, -`new cases`, -pop) %>%
+  reshape2::melt(c("country", "date")) %>%
+  rename(measure = variable) %>%
+  dplyr::filter(value == 1) %>%
+  group_by(country, measure) %>%
+  slice(1) %>%
+  ungroup() %>%
+  complete(country, measure) %>%
+  mutate(value = date) %>%
+  group_by(country) %>%
+  mutate(rk = rank(value, na.last = "keep", ties.method = "min")) %>%
+  ungroup() %>%
+  group_by(measure, rk) %>%
+  summarise(rk_sum = n()) %>%
+  ungroup() %>%
+  mutate(rk = ifelse(is.na(rk), "NA", rk)) %>%
+  mutate(rk = as.factor(rk))  %>%
+  mutate(order_rank = rk) %>%
+  mutate(order_rank = recode(order_rank, !!! order_time_ranks)) 
+
+date_rank_order <- data.frame(measure = c("Event ban", "Gathering ban", "School closure", 
+                                          "Border closure", "Venue closure", "Lockdown", "Work ban"),
+                              order_measure = 8 - c(1, 3, 2, 4, 5, 6, 7))
+
+dates_rank <- left_join(dates_rank, date_rank_order, "measure")
+
+dates_rank_pl <- dates_rank %>%
+  ggplot(aes(x = rk_sum, y = reorder(measure, order_measure), fill = reorder(rk, order_rank))) +
+  geom_bar(position = "stack", stat = "identity") +
+  scale_fill_manual(values = c("grey", RColorBrewer::brewer.pal(7, "Blues"))) +
+  labs(x = "Number of countries", y = "", fill = "Rank in time") +
+  theme_nature() +
+  theme(axis.title.y = element_blank(), legend.position = "bottom") +
+  guides(fill = guide_legend(nrow = 1, reverse = T))
+
+dates_rank_pl
+```
+
+
+### Tbl S1
+
+*Note: The values in the Tbl S1 of the paper are currently slightly wrong. Here are the correct ones.*
+
+```{r}
+npi_difs = function(type = "mean", 
+                    npi_list = c("School closure", "Border closure", "Event ban",
+                                 "Gathering ban", "Venue closure", "Lockdown", "Work ban"),
+                    country_list = sort(unique(df$country))){
+  
+  # init table
+  table_appendix =  data.frame(matrix(ncol = length(npi_list), nrow = length(npi_list)))
+  colnames(table_appendix) = c("School closure", "Border closure", "Event ban",
+                               "Gathering ban", "Venue closure", "Lockdown", "Work ban")
+  rownames(table_appendix) = c("School closure", "Border closure", "Event ban",
+                               "Gathering ban", "Venue closure", "Lockdown", "Work ban")
+  
+  # fill table with time deltas between npi a and npi b for given country
+  for (npi_a in npi_list) {
+    for (npi_b in npi_list) {
+      
+      countries_delta = c(rep(NA, length(country_list)))
+      ctr = 1
+      
+      for (country_i in country_list) {
+        # skip same NPIs
+        if (!(npi_a == npi_b)){
+          # get time diff betwwen npi_a and npi_b in country_i
+          dat_ctr <- df[df[["country"]] == country_i,]
+          dates_npi_a <- dat_ctr[dat_ctr[, npi_a]==1,]$date
+          dates_npi_b <- dat_ctr[dat_ctr[, npi_b]==1,]$date
+          time_npi_a <- ifelse(length(dates_npi_a) == 0, NA, min(dates_npi_a))
+          time_npi_b <- ifelse(length(dates_npi_b) == 0, NA, min(dates_npi_b))
+          if (is.na(time_npi_a) | is.na(time_npi_b)) {
+            delta <- NA
+          } else {
+            delta <- abs(as.double(time_npi_a-time_npi_b))
+          }
+          # add data to matrix
+          countries_delta[ctr] = delta
+          ctr = ctr + 1
+        }
+      }
+      
+      if (type == "mean") {
+        table_appendix[npi_a, npi_b] <- round_k(mean(countries_delta, na.rm = TRUE),1)
+      } else {
+        table_appendix[npi_a, npi_b] <- round_k(median(countries_delta, na.rm = TRUE),1)
+      }
+      ctr = 1
+    }
+  }
+  return(table_appendix)
+}
+
+npi_difs(type = "mean")
+```
+
+### Tbl S2
+
+*Note: The values in the Tbl S2 of the paper are currently slightly wrong. Here are the correct ones.*
+
+```{r}
+npi_difs(type = "median")
+```
+
+
+## Preprocessing
+
+```{r}
+df_pp <- df %>%
+  rename(schools = `School closure`,
+         events = `Event ban`,
+         venues = `Venue closure`, 
+         borders = `Border closure`,
+         gatherings = `Gathering ban`,
+         lockdown = `Lockdown`,
+         homeoffice = `Work ban`,
+         new_cases = `new cases`) %>%
+  dplyr::filter(cases >= 1) %>% # Start at first case
+  dplyr::filter(date <= (Sys.Date() %m-% lubridate::days(1))) %>% # Exclude last day (potential pending data corrections)
+  dplyr::filter(!is.na(new_cases)) %>%
+  mutate(country_id = as.numeric(as.factor(country))) %>% 
+  mutate(weekday = weekdays(date)) %>% 
+  mutate(monday = ifelse(weekday == "Monday", 1, 0),
+         tuesday = ifelse(weekday == "Tuesday", 1, 0),
+         wednesday = ifelse(weekday == "Wednesday", 1, 0),
+         thursday = ifelse(weekday == "Thursday", 1, 0),
+         friday = ifelse(weekday == "Friday", 1, 0),
+         saturday = ifelse(weekday == "Saturday", 1, 0),
+         sunday = ifelse(weekday == "Sunday", 1, 0)) %>%
+  group_by(country) %>%
+  arrange(date) %>%
+  mutate(days = 1:n()) %>%
+  ungroup()
+```
+
+## Descriptives 
+
+### Fig 2 & Fig S3
+
+```{r}
+plot_cases_temp <- function(y = "cases", ctry) {
+  print(sprintf("Create plot for country %s", ctry))
+    
+    cases_temp <- df_pp %>%
+      dplyr::filter(country == ctry) 
+    if (ctry %in% c("Switzerland", "Luxembourg")) {
+      cases_temp <- cases_temp %>% dplyr::filter(cases >= 5)
+    } else {
+      cases_temp <- cases_temp %>% dplyr::filter(cases >= 10)
+    }
+    cases_temp <- cases_temp %>%
+      arrange(date) %>%
+      mutate(days = 1:n()) %>%
+      mutate(is_weekend = factor(ifelse(weekdays(date) %in% c("Saturday", "Sunday"), "Weekend", "Weekday"))) %>%
+      mutate(is_weekend = factor(is_weekend, levels = c("Weekend", "Weekday"))) %>%
+      mutate(after_100 = factor(ifelse(cases > 100, "Study period (cases $\\geq$ 100)", "Early period  (cases $\\geq$ 10)"))) %>%
+      mutate(after_100 = factor(after_100, levels = c("Study period (cases $\\geq$ 100)", "Early period  (cases $\\geq$ 10)"))) 
+    
+    cases_temp_text <- cases_temp %>% 
+      dplyr::select(days, date, !! sym(y), schools, events, gatherings, venues, borders, lockdown, homeoffice) %>%
+      set_names(c("days", "date", y, "School closure", "Events ban", "Gatherings ban", 
+                  "Venue closure", "Border closure", "Lockdown", "Work ban")) %>%
+      reshape2::melt(c("days", "date", y)) %>%
+      rename(measure = variable) %>%
+      group_by(measure) %>%
+      arrange(days) %>%
+      dplyr::filter(value == 1) %>%
+      slice(1) %>%
+      ungroup() %>%
+      dplyr::select(date, !! sym(y), measure) %>%
+      group_by(date, !! sym(y)) %>%
+      summarize(measure = paste(measure, collapse = " \n"))
+    
+    cases_temp_pl <- ggplot() + 
+      geom_line(data = cases_temp, mapping = aes(x = date, y = !! sym(y)), linetype = "dashed") +
+      geom_line(data = cases_temp, mapping = aes(x = date, y = !! sym(y), linetype = after_100)) +
+      geom_tile(data = cases_temp, mapping = aes(x = date, y = 5, height = Inf, fill = is_weekend), alpha = .1) +
+      geom_point(data = cases_temp_text, mapping = aes(x = date, y = !! sym(y))) +
+      geom_text_repel(data = cases_temp_text, mapping = aes(x = date, y = !! sym(y), label = measure), 
+                      direction = "y", point.padding=1, nudge_y=1, force=20, segment.alpha=.5, size = 5/14*text_size, seed=1) +
+      scale_fill_grey() +
+      scale_y_continuous(trans = ifelse(y == "cases", "log10", "identity"), 
+                         labels = function(x) scales::comma(x, accuracy = 1.0)) +
+      scale_x_date(breaks = seq.Date(min(cases_temp$date), max(cases_temp$date), by = "2 week"), date_labels ="%b %d") +
+      labs(x = "", y = paste("Number of", gsub("_", " ", y)), fill = "") +
+      theme_nature() +
+      theme(legend.position = "right", legend.title = element_blank(), axis.title.x = element_blank()) +
+      guides(linetype = guide_legend(order = 1), fill = guide_legend(order = 2))
+    
+    return(cases_temp_pl)
+}
+```
+
+```{r}
+df_pp %>%
+  dplyr::select(country, date, cases, schools, events, gatherings, venues, borders, lockdown, homeoffice) %>%
+  reshape2::melt(c("country", "date", "cases")) %>%
+  rename(measure = variable) %>%
+  group_by(country) %>%
+  arrange(date) %>%
+  dplyr::filter(value == 1) %>%
+  slice(1) %>%
+  ungroup() %>%
+  View()
+```
+
+```{r}
+plot_cases_temp("new_cases", "United Kingdom")
+plot_cases_temp("new_cases", "United States")
+```
+
+```{r}
+for (ctry in unique(df_pp$country)) {
+  cases_temp_pl_ctry <- plot_cases_temp("new_cases", ctry)
+  cases_temp_pl_ctry <- cases_temp_pl_ctry + ggtitle(ctry)
+  print(cases_temp_pl_ctry)
+}
+```
+
+
+
+## Model
+
+### Transform data
+
+```{r}
+lag_measures <- function(dat, k) {
+  dat <- dat %>%
+    group_by(country) %>%
+    arrange(date) %>%
+    mutate_at(vars(schools, events, venues, borders, gatherings, lockdown, homeoffice), dplyr::lag, n = k) %>% 
+    fill(schools, .direction = "up") %>%
+    fill(events, .direction = "up") %>%
+    fill(gatherings, .direction = "up") %>%
+    fill(venues, .direction = "up") %>%
+    fill(borders, .direction = "up") %>%
+    fill(homeoffice, .direction = "up") %>%
+    fill(lockdown, .direction = "up") %>%
+    ungroup()
+  return(dat)
+}
+  
+start_cases <- function(dat, n_cases) {
+  dat <- dat %>%
+    dplyr::filter(cases >= n_cases) %>%
+    group_by(country) %>%
+    mutate(days = 1:n()) %>%
+    ungroup()
+  return(dat)
+}
+
+make_stan_dat <- function(dat) {
+  M_mat <- unname(model.matrix(~ 0 + schools + borders + events + gatherings + venues + lockdown + homeoffice, dat))
+  W_mat <- unname(model.matrix(~ 0 + tuesday + wednesday + thursday + friday + saturday + sunday, dat))
+  stan_dat = list(
+    N = nrow(dat),
+    country = dat$country_id,
+    J = max(dat$country_id),
+    new_cases = dat$new_cases, 
+    cases = dat$cases, 
+    days = dat$days,
+    M = ncol(M_mat),
+    Measures = M_mat,
+    W = ncol(W_mat),
+    Weekdays = W_mat
+  )
+  return(stan_dat)
+}
+```
+
+
+### Main
+
+#### Estimation
+
+```{r}
+df_pp7 <- lag_measures(df_pp, 7)
+df_pp7_100 <- start_cases(df_pp7, 100)
+stanDat7_100 <- make_stan_dat(df_pp7_100)
+
+negbinom_file <- "StanModels/negbinom_model.stan"
+main <- stan(file = negbinom_file, data = stanDat7_100, iter = 2000, chains = 4, 
+             seed = 483892929, save_dso = T, control = list(max_treedepth = 15))
+saveRDS(main, file = "SavedStanModels/negbinom_model.rds")
+
+print(main, c("alpha", "sd_tau", "tau", "gamma", "theta", "phi"), probs = c(0.025, 0.975))
+
+params <- extract(main)[c("alpha", "tau", "sd_tau", "gamma", "theta", "phi")]
+params_ci <- main %>%
+  spread_draws(alpha, tau[country], sd_tau, gamma[weekday], theta[npi], phi) %>% 
+  mean_qi
+```
+
+#### Report setings
+
+```{r}
+# NPI names
+npi_var <- as.character(1:7)
+npi_names <- c("School closure", "Border closure", "Event ban", 
+               "Gathering ban", "Venue closure", "Lockdown", "Work ban")
+names(npi_names) <- npi_var
+npi_ranking <- 8 - rank(summary(main, pars = "theta")$summary[,"mean"])
+names(npi_ranking) <- npi_names
+
+# Country x Country ID mapping
+cid_country <- df_pp %>% group_by(country) %>% slice(1) %>% ungroup %>% dplyr::select(country, country_id)
+
+# Choose credible interval for reporting
+ci_interval <- mean_qi
+
+# Custom color for robustness checks
+custom.col <- c("#000000", "#C4961A", "#4E84C4")
+
+# Viridis color mapping for policy measures
+viridis_cols <- rev(viridis::viridis_pal()(length(npi_names)))
+names(viridis_cols) <- npi_names
+
+# Default plot for robustness checks
+plot_rc <- function(dat, color_lab, xl = c(0, .75), brks = seq(0,1,0.25)) {
+  dat <- dat %>%
+    mutate(measure = as.factor(recode(as.character(measure), !!! npi_names))) %>%
+    mutate(reduction = 1 - exp(theta)) %>%
+    mutate(measure_ranking = measure) %>%
+    mutate(measure_ranking = recode(measure_ranking, !!! npi_ranking))
+  rc_pl <- ggplot(dat, aes(y = reorder(measure, measure_ranking), x = reduction, color = spec)) +
+  stat_pointintervalh(point_interval = ci_interval, position =  
+                      ggstance::position_dodgev(height = .5), 
+                      point_size = 1) +
+  geom_vline(aes(xintercept = 0), linetype = "dashed", color = "red") +
+  scale_x_continuous(limits = xl, breaks = brks, labels = function(x) x * 100) +
+  scale_color_manual(values = custom.col) +
+  labs(x = "Estimated reduction in new cases (\\%)",
+       color = color_lab) +
+  theme_nature()  +
+  theme(axis.title.y = element_blank(), legend.position = "bottom")
+}
+```
+
+#### Tbl S4
+
+```{r}
+main_results <- summary(main, c("alpha", "tau", "sd_tau", "gamma", "theta", "phi"))$summary %>%
+  data.frame() %>%
+  dplyr::select(mean, n_eff, Rhat) %>%
+  setNames(c("Mean", "ESS", "Rhat")) %>% 
+  mutate(Mean = c(params_ci$alpha[1],
+                  params_ci %>% group_by(country) %>% slice(1) %>% arrange(country) %>% ungroup() %>% 
+                    dplyr::select(tau) %>% unlist,
+                  params_ci$sd_tau[1],
+                  params_ci %>% group_by(weekday) %>% slice(1) %>% arrange(weekday) %>% ungroup() %>% 
+                    dplyr::select(gamma) %>% unlist,
+                  params_ci %>% group_by(npi) %>% slice(1) %>% arrange(npi) %>% ungroup() %>% 
+                    dplyr::select(theta) %>% unlist,
+                  params_ci$phi[1]),
+         Lower = c(params_ci$alpha.lower[1],
+                  params_ci %>% group_by(country) %>% slice(1) %>% arrange(country) %>% ungroup() %>% 
+                    dplyr::select(tau.lower) %>% unlist,
+                  params_ci$sd_tau.lower[1],
+                  params_ci %>% group_by(weekday) %>% slice(1) %>% arrange(weekday) %>% ungroup() %>% 
+                    dplyr::select(gamma.lower) %>% unlist,
+                  params_ci %>% group_by(npi) %>% slice(1) %>% arrange(npi) %>% ungroup() %>% 
+                    dplyr::select(theta.lower) %>% unlist,
+                  params_ci$phi.lower[1]),
+         Upper = c(params_ci$alpha.upper[1],
+                  params_ci %>% group_by(country) %>% slice(1) %>% arrange(country) %>% ungroup() %>% 
+                    dplyr::select(tau.upper) %>% unlist,
+                  params_ci$sd_tau.upper[1],
+                  params_ci %>% group_by(weekday) %>% slice(1) %>% arrange(weekday) %>% ungroup() %>% 
+                    dplyr::select(gamma.upper) %>% unlist,
+                  params_ci %>% group_by(npi) %>% slice(1) %>% arrange(npi) %>% ungroup() %>% 
+                    dplyr::select(theta.upper) %>% unlist,
+                  params_ci$phi.upper[1])) %>%
+  mutate(Mean = round_k(Mean),
+         neffRatio = round_k(neff_ratio(main)[c("alpha", paste0("tau[",1:20,"]"), "sd_tau", paste0("gamma[",1:6,"]"), 
+                                        paste0("theta[",1:length(npi_names),"]"), "phi")]),
+         Rhat = round_k(Rhat),
+         Lower = round_k(Lower),
+         Upper = round_k(Upper),
+         Parameter = c("$\\alpha$", paste0("$\\alpha_{", 1:20, "}$"), "$\\sigma_{\\alpha}$",
+                       paste0("$\\gamma_{", 1:6,"}$"), paste0("$\\theta_{", 1:length(npi_names), "}$"), "$\\phi$"),
+         Name = c("Intercept", as.character(cid_country$country), "Country SD", 
+                  "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+                  npi_names, "Overdispersion")) %>%
+  dplyr::select(Parameter, Name, Mean, Lower, Upper, neffRatio, Rhat)
+
+main_results
+```
+
+```{r}
+npi_effects <- data.frame(
+  Mean = params_ci %>% group_by(npi) %>% slice(1) %>% arrange(npi) %>% ungroup() %>% 
+                    dplyr::select(theta) %>% unlist,
+  Upper = params_ci %>% group_by(npi) %>% slice(1) %>% arrange(npi) %>% ungroup() %>% 
+                    dplyr::select(theta.lower) %>% unlist,
+  Lower = params_ci %>% group_by(npi) %>% slice(1) %>% arrange(npi) %>% ungroup() %>% 
+                    dplyr::select(theta.upper) %>% unlist
+) %>%
+  mutate_all(function(x) round((1-exp(x)) * 100, 0)) %>%
+  mutate(NPI = npi_names) %>%
+  dplyr::select(NPI, Mean, Lower, Upper) %>%
+  arrange(desc(Mean))
+
+npi_effects
+```
+
+#### Fig 3
+
+```{r}
+npi_main <- main %>%
+  spread_draws(theta[measure]) %>%
+  ungroup()
+
+npi_pl <- npi_main %>%
+  mutate(measure = as.factor(recode(as.character(measure), !!! npi_names))) %>%
+  mutate(reduction = 1 - exp(theta)) %>%
+  ggplot(aes(y = reorder(measure, reduction), x = reduction)) +
+  stat_pointintervalh(point_interval = ci_interval) +
+  geom_vline(aes(xintercept = 0), linetype = "dashed", color = "black") +
+  scale_x_continuous(limits = c(0,.75), breaks = seq(0,1,0.25), labels = function(x) x * 100) +
+  labs(x = "Estimated reduction in new cases (\\%)",
+       y = "Non-pharmaceutical intervention") +
+  theme_nature() +
+  theme(axis.title.y = element_blank())
+
+npi_pl
+```
+
+#### Fig 4
+
+```{r}
+main_ranks <- main %>% 
+  spread_draws(theta[measure]) %>%
+  mutate(reduction = 1 - exp(theta)) %>%
+  group_by(.draw) %>%
+  mutate(est_rank = rank(-reduction)) %>%
+  ungroup() %>%
+  group_by(measure, est_rank) %>%
+  summarize(share_rank = n() / 4000) %>%
+  ungroup() %>%
+  mutate(measure = recode(measure, !!! npi_names)) %>%
+  mutate(measure_order = recode(measure, !!! npi_ranking)) %>%
+  mutate(est_rank = factor(est_rank, level = rev(as.character(1:length(npi_names)))))
+
+ranks_pl <- main_ranks %>%
+  ggplot(aes(y = reorder(measure, measure_order), x = share_rank, fill = est_rank)) +
+  geom_bar(position = "stack", stat = "identity") +
+  geom_vline(aes(xintercept = 0.5), linetype = "dashed") +
+  scale_fill_brewer() +
+  labs(y = "", x = "Proportion of posterior samples", fill = "Posterior rank of NPI ($\\theta_m$)") +
+  theme_nature() +
+  theme(axis.title.y = element_blank(), legend.position = "bottom") +
+  guides(fill = guide_legend(nrow = 1, reverse = T))
+
+ranks_pl
+```
+
+#### Fig 5 & Fig S10
+
+```{r}
+m_alpha <- params_ci$alpha[1]
+m_tau <- params_ci %>% group_by(country) %>% slice(1) %>% arrange(country) %>% ungroup() %>% dplyr::select(tau) %>% unlist
+m_gamma <- params_ci %>% group_by(weekday) %>% slice(1) %>% arrange(weekday) %>% ungroup() %>% dplyr::select(gamma) %>% unlist
+m_theta <- params_ci %>% group_by(npi) %>% slice(1) %>% arrange(npi) %>% ungroup() %>% dplyr::select(theta) %>% unlist
+
+comp_new_cases <- function(alpha = m_alpha, tau = m_tau, gamma = m_gamma, theta = m_theta, 
+                           cases, country_id, Weekdays, Measures) {
+  eta <- alpha + tau[country_id] + Weekdays %*% gamma + Measures %*% theta
+  mu <- cases * exp(eta)
+  return(mu)
+}
+
+df_pred_list <- list()
+npi_vars <- c("schools", "borders", "events", "gatherings", "venues", "lockdown", "homeoffice")
+for (k in 1:(length(npi_vars) + 1)) {
+  if (k > 1) {zero_npis <- npi_vars[k-1]}
+  df_pred_list_ctry <- list()
+  for (r in 1:max(df_pp7_100$country_id)) {
+    dat_ctry <- df_pp7_100 %>% 
+      dplyr::filter(country_id == r) %>% 
+      arrange(date) 
+    if (k > 1) {dat_ctry <- mutate_at(dat_ctry, zero_npis, function(x) x = 0)}
+    WM <- unname(model.matrix(~ 0 + tuesday + wednesday + thursday + friday + saturday + sunday, dat_ctry))
+    MM <- unname(model.matrix(~ 0 + schools + borders + events + gatherings + venues + lockdown + homeoffice, dat_ctry))
+    new_cases_pred <- numeric(nrow(dat_ctry))
+    for (i in 1:nrow(dat_ctry)) {
+      new_cases_pred[i] <- comp_new_cases(cases = dat_ctry$cases[i], country_id = r, Weekdays = WM[i, ], Measures = MM[i, ])
+    }
+    dat_ctry$new_cases_pred <- new_cases_pred
+    dat_ctry$npis_active <- ifelse(k == 1, "Estimated", paste("No", npi_names[k-1]))
+    dat_ctry$npis_active_rank <- ifelse(k == 1, length(npi_var)+1, (length(npi_var)+1) - as.numeric(npi_var[k-1]))
+    df_pred_list_ctry[[r]] <- dat_ctry
+  }
+  df_pred_list[[k]] <- do.call(rbind, df_pred_list_ctry)
+}
+
+df_pred_npi <- do.call(rbind, df_pred_list[2:(length(npi_vars) + 1)])
+df_pred_none <- df_pred_list[[1]]
+```
+
+```{r}
+plot_new_cases <- function(ctry) {
+  
+  df_pred_bar <- df_pred_none %>%
+    dplyr::filter(country == ctry) 
+  
+  df_pred_line <- dplyr::filter(df_pp7_100, country == ctry) %>%
+    left_join(df_pred_bar %>% dplyr::select(date, new_cases_pred), by = "date") %>%
+    dplyr::select(date, new_cases, new_cases_pred) %>%
+    reshape2::melt(id.vars = "date") %>%
+    rename(new_cases = value) %>%
+    mutate(variable = factor(ifelse(variable == "new_cases_pred", "Estimated", "Observed"))) %>%
+    mutate(variable = factor(variable, levels = c("Observed", "Estimated")))
+  
+  df_pred_area <- dplyr::filter(df_pred_npi, country == ctry) %>%
+    left_join(df_pred_bar %>% 
+              dplyr::select(date, new_cases_pred) %>% 
+              rename(new_cases_pred_none = new_cases_pred), 
+            by = "date") %>%
+    mutate(new_cases_pred = ifelse(npis_active == "No School closure", new_cases_pred, new_cases_pred - new_cases_pred_none)) %>%
+    group_by(npis_active) %>%
+    dplyr::filter(!all(new_cases_pred == 0)) %>%
+    ungroup() %>%
+    mutate(npis_active = factor(npis_active))
+  
+  active_npis <- gsub("No ", "", as.character(unique(df_pred_area$npis_active)))
+  active_npis_cols <- viridis_cols[active_npis]
+  names(active_npis_cols) <- paste("No", names(active_npis_cols))
+
+
+  pl <- ggplot() +
+    geom_bar(data = df_pred_area, mapping = aes(x = date, y = new_cases_pred, fill = reorder(npis_active, npis_active_rank)),
+             stat = "identity", alpha = 0.75 , size = .5, colour = "white") +
+    geom_bar(data = df_pred_bar, mapping = aes(x = date, y = new_cases_pred), fill = "grey",
+             stat = "identity") +
+    geom_line(data = df_pred_line, mapping = aes(x = date, y = new_cases, linetype = variable)) +
+    scale_x_date(breaks = seq.Date(min(df_pred_area$date), max(df_pred_area$date), by = "week"), date_labels ="%b %d") +
+    scale_fill_manual(values = active_npis_cols) +
+    scale_y_continuous(labels = function(x) scales::comma(x, accuracy = 1.0)) +
+    labs(x = "", y = "Number of new cases", fill = "", linetype = "") +
+    theme_nature() +
+    theme(legend.position = "right", axis.title.x = element_blank()) +
+    guides(linetype = guide_legend(order = 1), fill = guide_legend(order = 2))
+  
+  return(pl)
+}
+
+plot_new_cases("United Kingdom")
+plot_new_cases("Spain")
+```
+
+```{r}
+for (r in unique(df_pp7_100$country)) {
+  print(sprintf("Create plot for country %s", r))
+  r_pl <- plot_new_cases(r)
+  r_pl <- r_pl + ggtitle(r)
+  print(r_pl)
+}
+```
+
+
+### Model checks
+
+#### Pairwise posterior
+
+##### Fig S4
+
+```{r}
+npi_main_theta <- npi_main %>%
+  dplyr::select(measure, theta, .draw) %>%
+  spread(measure, theta) %>%
+  set_names(c("draw", npi_names)) %>%
+  dplyr::select(-draw)
+
+contours <- function(data, mapping, ...){
+      p <- ggplot(data = data, mapping = mapping) + 
+        stat_density2d() +
+        scale_x_continuous(breaks = seq(-.6,0,.2)) +
+        scale_y_continuous(breaks = seq(-.6,0,.2))
+      p
+}
+
+cor_fun <- function(data, mapping, method="pearson", ndp=2, sz=5, stars=TRUE, ...){
+
+    x <- eval_data_col(data, mapping$x)
+    y <- eval_data_col(data, mapping$y)
+
+    corr <- cor.test(x, y, method=method)
+    est <- corr$estimate
+    #lb.size <- sz* abs(est) 
+
+    if(stars){
+      stars <- c("***", "**", "*", "")[findInterval(corr$p.value, c(0, 0.001, 0.01, 0.05, 1))]
+      lbl <- paste0(round(est, ndp), stars)
+    }else{
+      lbl <- round(est, ndp)
+    }
+
+    ggplot(data=data, mapping=mapping) + 
+      annotate("text", x = mean(x, na.rm = TRUE), y = mean(y, na.rm= TRUE), label = lbl, size= sz,...)+
+      theme(panel.grid = element_blank())
+}
+
+hist_fun <- function(data, mapping) {
+  p <- ggplot(data, mapping) +
+    geom_histogram(bins = 20) +
+    scale_x_continuous(limits = c(-1, 0), breaks = c(-.8, -.4, 0))
+}
+
+corr_pl <- ggpairs(npi_main_theta, lower = list(continuous = contours),
+                   diag = list(continuous = wrap(hist_fun)),
+                   upper = list(continuous = wrap(cor_fun, sz = text_size*5/14, stars = FALSE))) +
+  theme_nature()
+
+corr_pl
+```
+
+
+#### Influential observations
+
+##### Fig S5
+
+```{r}
+main_loo <- rstan::loo(main)
+
+loo_dat <- data.frame(country = df_pp7_100$country,
+                      date = df_pp7_100$days,
+                      k = main_loo$diagnostics$pareto_k)
+
+loo_pl <- loo_dat %>%
+  ggplot(aes(x = date, y = k)) +
+  geom_point(shape = 3) +
+  facet_wrap(~ country, ncol = 4) +
+  geom_hline(aes(yintercept = 0), linetype = "dashed", color = "black") +
+  geom_hline(aes(yintercept = 0.5), linetype = "dashed", color = "red") +
+  geom_hline(aes(yintercept = 0.7), linetype = "dashed", color = "red") +
+  scale_y_continuous(limits = c(min(loo_dat$k)-0.05, ifelse(max(loo_dat$k) > 1, max(loo_dat$k), 1)), breaks = c(0, 0.5, 0.7)) +
+  labs(y = "Pareto shape k", x = "Days since 100 cases") +
+  theme_nature() 
+
+loo_pl
+```
+
+### Model comparison
+
+```{r}
+loos <- lapply(list(main, rc_lag5, rc_lag9, rc_ss), rstan::loo)
+
+model_map <- data.frame(rowname = paste0("model", 1:4),
+                        effect_function = c(rep("Step function", 3), "First order spline"),
+                        time_delay = c("$t_0 = 7$", "$t_0 = 5$", "$t_0 = 9$", "$t_0 = 5$, $t_1 = 12$"))
+
+loo_df <- data.frame(loo_compare(loos)) %>%
+  rownames_to_column() %>%
+  left_join(model_map, by = "rowname") %>%
+  dplyr::select(effect_function, time_delay, elpd_loo, se_elpd_loo, elpd_diff, se_diff) %>%
+  mutate_if(is.numeric, function(x) round_k(x))
+
+xtable::print.xtable(
+  file = "FinalResults/model_comparison_f.tex",
+  xtable::xtable(
+    loo_df
+  ),
+  only.contents = T,
+  include.rownames = F,
+  sanitize.text.function = identity,
+  include.colnames = F,
+  hline.after = NULL
+)
+```
+
+
+### Sensitivity Analysis
+
+#### Other start
+
+```{r}
+df_pp7_10 <- start_cases(df_pp7, 10)
+stanDat7_10 <- make_stan_dat(df_pp7_10)
+
+rc_10cases <- stan(file = negbinom_file, data = stanDat7_10, iter = 2000, chains = 4, 
+                   save_dso = F, seed = 483892929, control = list(max_treedepth = 15))
+
+print(rc_10cases, c("alpha", "sd_tau", "tau", "gamma", "theta", "phi"), probs = c(0.025, 0.975))
+```
+
+##### Fig S6
+
+```{r}
+npi_10cases <- rc_10cases %>% spread_draws(theta[measure]) %>% ungroup() 
+
+npi_rc_10cases <- rbind(npi_main, npi_10cases) %>%
+  mutate(spec = rep(c("100", "10"), each = nrow(npi_main))) %>%
+  mutate(spec = factor(spec, levels = c("100", "10"))) 
+
+npi_rc_10cases_pl <- plot_rc(npi_rc_10cases, "Number of cases at start")
+
+npi_rc_10cases_pl
+```
+
+#### Vary delay
+
+```{r}
+df_pp5 <- lag_measures(df_pp, 5)
+df_pp5_100 <- start_cases(df_pp5, 100)
+stanDat5_100 <- make_stan_dat(df_pp5_100)
+
+rc_lag5 <- stan(file = negbinom_file, data = stanDat5_100, iter = 2000, chains = 4, 
+                save_dso = F, seed = 483892929, control = list(max_treedepth = 15))
+```
+
+```{r}
+df_pp9 <- lag_measures(df_pp, 9)
+df_pp9_100 <- start_cases(df_pp9, 100)
+stanDat9_100 <- make_stan_dat(df_pp9_100)
+
+rc_lag9 <- stan(file = negbinom_file, data = stanDat9_100, iter = 2000, chains = 4, 
+                save_dso = F, seed = 483892929, control = list(max_treedepth = 15))
+```
+
+##### Fig S7
+
+```{r}
+npi_lag5 <- rc_lag5 %>% spread_draws(theta[measure]) %>% ungroup()
+npi_lag9 <- rc_lag9 %>% spread_draws(theta[measure]) %>% ungroup() 
+
+npi_rc_lag <- rbind(npi_lag5, npi_main, npi_lag9) %>%
+  mutate(spec = rep(c("5", "7", "9"), each = nrow(npi_main))) %>%
+  mutate(spec = factor(spec, levels = c("7", "5", "9"))) 
+
+npi_rc_lag_pl <- plot_rc(npi_rc_lag, "Time delay of effect ($t_0$)")
+
+npi_rc_lag_pl 
+```
+
+#### First-order spline
+
+```{r}
+simple_spline <- function(x, t) {
+  y <- numeric(length(x))
+  t0 <- t[which(x == 1)[1]]
+  if (is.na(t0)) {
+    t0 <- max(t)
+  }
+  t1 <- t0 + 7
+  y <- ifelse(t <= t0, 0, ifelse(t <= t1, (t - t0) / (t1 - t0), 1))
+  return(y)  
+}
+
+df_pp5_100_ss <- df_pp5_100 %>% 
+  group_by(country_id) %>%
+  mutate(schools = simple_spline(schools, days),
+         borders = simple_spline(borders, days),
+         events = simple_spline(events, days),
+         gatherings = simple_spline(gatherings, days),
+         venues = simple_spline(venues, days),
+         lockdown = simple_spline(lockdown, days),
+         homeoffice = simple_spline(homeoffice, days)) %>%
+  ungroup()
+stanDat5_100_ss <- make_stan_dat(df_pp5_100_ss)
+
+rc_ss <- stan(file = negbinom_file, data = stanDat5_100_ss, iter = 2000, chains = 4, 
+             seed = 483892929, save_dso = T, control = list(max_treedepth = 15))
+
+print(rc_ss, c("alpha", "sd_tau", "tau", "gamma", "theta", "phi"), probs = c(0.025, 0.975))
+```
+
+##### Fig S8
+
+```{r}
+npi_ss <- rc_ss %>% spread_draws(theta[measure]) %>% ungroup() 
+
+npi_rc_ss <- rbind(npi_main, npi_ss) %>%
+  mutate(spec = rep(c("Step function", "First order spline"), each = nrow(npi_main))) %>%
+  mutate(spec = factor(spec, levels = c("Step function", "First order spline"))) 
+
+npi_rc_ss_pl <- plot_rc(npi_rc_ss, "Influence function ($f_{\\theta}$)")
+
+npi_rc_ss_pl
+```
+
+#### Unbounded theta
+
+```{r}
+negbinom_unbounded <- "StanModels/negbinom_model_unbounded.stan"
+rc_theta <- stan(file = negbinom_unbounded, data = stanDat7_100, iter = 2000, chains = 4, 
+                 save_dso = T, seed = 483892929, control = list(max_treedepth = 15))
+
+print(rc_theta, c("alpha", "sd_tau", "tau", "gamma", "theta", "phi"), probs = c(0.025, 0.975))
+```
+
+##### Fig S9
+
+```{r}
+npi_unbounded_theta <- rc_theta %>% spread_draws(theta[measure]) %>% ungroup() 
+
+npi_rc_theta <- rbind(npi_main, npi_unbounded_theta) %>%
+  mutate(spec = rep(c("Bounded", "Unbounded"), each = nrow(npi_main))) %>%
+  mutate(spec = factor(spec, levels = c("Bounded", "Unbounded"))) 
+
+npi_rc_theta_pl <- plot_rc(npi_rc_theta, "Effect of NPIs", 
+                           xl = c(pmin(min(1-exp(npi_unbounded_theta$theta)), 0), 
+                                  pmax(max(1-exp(npi_unbounded_theta$theta)), 0.75)),
+                           brks = seq(-.5, .75, .25))
+
+npi_rc_theta_pl
+```
