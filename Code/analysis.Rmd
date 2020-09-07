@@ -21,7 +21,6 @@ library(GGally)
 
 library(rstan)
 library(brms)
-library(rethinking)
 library(tidybayes)
 library(bayesplot)
 library(LaplacesDemon)
@@ -827,35 +826,6 @@ loo_pl <- loo_dat %>%
 loo_pl
 ```
 
-### Model comparison
-
-```{r}
-loos <- lapply(list(main, rc_lag5, rc_lag9, rc_ss), rstan::loo)
-
-model_map <- data.frame(rowname = paste0("model", 1:4),
-                        effect_function = c(rep("Step function", 3), "First order spline"),
-                        time_delay = c("$t_0 = 7$", "$t_0 = 5$", "$t_0 = 9$", "$t_0 = 5$, $t_1 = 12$"))
-
-loo_df <- data.frame(loo_compare(loos)) %>%
-  rownames_to_column() %>%
-  left_join(model_map, by = "rowname") %>%
-  dplyr::select(effect_function, time_delay, elpd_loo, se_elpd_loo, elpd_diff, se_diff) %>%
-  mutate_if(is.numeric, function(x) round_k(x))
-
-xtable::print.xtable(
-  file = "FinalResults/model_comparison_f.tex",
-  xtable::xtable(
-    loo_df
-  ),
-  only.contents = T,
-  include.rownames = F,
-  sanitize.text.function = identity,
-  include.colnames = F,
-  hline.after = NULL
-)
-```
-
-
 ### Sensitivity Analysis
 
 #### Other start
@@ -990,4 +960,33 @@ npi_rc_theta_pl <- plot_rc(npi_rc_theta, "Effect of NPIs",
                            brks = seq(-.5, .75, .25))
 
 npi_rc_theta_pl
+```
+
+
+### Model comparison
+
+```{r}
+loos <- lapply(list(main, rc_lag5, rc_lag9, rc_ss), rstan::loo)
+
+model_map <- data.frame(rowname = paste0("model", 1:4),
+                        effect_function = c(rep("Step function", 3), "First order spline"),
+                        time_delay = c("$t_0 = 7$", "$t_0 = 5$", "$t_0 = 9$", "$t_0 = 5$, $t_1 = 12$"))
+
+loo_df <- data.frame(loo_compare(loos)) %>%
+  rownames_to_column() %>%
+  left_join(model_map, by = "rowname") %>%
+  dplyr::select(effect_function, time_delay, elpd_loo, se_elpd_loo, elpd_diff, se_diff) %>%
+  mutate_if(is.numeric, function(x) round_k(x))
+
+xtable::print.xtable(
+  file = "FinalResults/model_comparison_f.tex",
+  xtable::xtable(
+    loo_df
+  ),
+  only.contents = T,
+  include.rownames = F,
+  sanitize.text.function = identity,
+  include.colnames = F,
+  hline.after = NULL
+)
 ```
